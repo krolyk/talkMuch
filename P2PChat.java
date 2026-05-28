@@ -5,15 +5,13 @@ import java.io.PrintWriter;
 import java.net.*;
 import java.util.Collections;
 import java.util.Set;
-import java.util.ConcurrentModificationException;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class P2PChat {
-    private static final int UDP_PORT = 9999;
-    private static final int TCP_PORT = 8888;
+    private static int UDP_PORT = 9999;
+    private static int TCP_PORT = 8888;
     private static final String DISCOVERY_MESSAGE = "P2P_CHAT_DISCOVER";
     
-    // Thread-safe set to hold active peer TCP sockets
     private static final Set<Socket> peerSockets = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static String username = "Unknown";
 
@@ -29,22 +27,38 @@ public class P2PChat {
 
         System.out.println("--- Starting P2P Chat Instance [" + username + "] ---");
 
-        // 1. Start TCP Server to handle incoming chat connections
-        new Thread(P2PChat::runTcpServer, "TCP-Server").start();
+        if (!startTcpServer()) {
+            System.err.println("Fatal: Could not bind TCP server to any port.");
+            return;
+        }
 
-        // 2. Start UDP Listener to detect other peers automatically
-        new Thread(P2PChat::runUdpListener, "UDP-Listener").start();
+        startUdpListener();
 
-        // 3. Start UDP Broadcaster to let other peers find us
         new Thread(P2PChat::runUdpBroadcaster, "UDP-Broadcaster").start();
 
-        // 4. Handle user input in the main thread
         runConsoleReader();
     }
 
-    // --- 1. TCP SERVER ---
-    private static void runTcpServer() {
-        try (ServerSocket serverSocket = new ServerSocket(TCP_PORT)) {
+    private static boolean startTcpServer() {
+        try {
+            ServerSocket serverSocket = new ServerSocket(TCP_PORT);
+            new Thread(() -> runTcpServer(serverSocket), "TCP-Server").start();
+            return true;
+        } catch (IOException e) {
+            try {
+                ServerSocket serverSocket = new ServerSocket(0);
+                TCP_PORT = serverSocket.getLocalPort();
+                System.out.println("[System] Default TCP port busy. Allocated dynamic port: " + TCP_PORT);
+                new Thread(() -> runTcpServer(serverSocket), "TCP-Server").start();
+                return true;
+            } catch (IOException ex) {
+                return false;
+            }
+        }
+    }
+
+    private static void runTcpServer(ServerSocket serverSocket) {
+        try {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 if (addPeer(clientSocket)) {
@@ -52,46 +66,73 @@ public class P2PChat {
                 }
             }
         } catch (IOException e) {
-            System.err.println("TCP Server error: " + e.getMessage());
+            System.err.println("TCP Server run error: " + e.getMessage());
         }
     }
 
-    // --- 2. UDP LISTENER ---
-    private static void runUdpListener() {
-        try (DatagramSocket udpSocket = new DatagramSocket(UDP_PORT)) {
-            udpSocket.setBroadcast(true);
-            byte[] buffer = new byte[1024];
-
-            while (true) {
-                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                udpSocket.receive(packet);
-
-                String message = new String(packet.getData(), 0, packet.getLength()).trim();
-                InetAddress peerIp = packet.getAddress();
-
-                // Ignore packets sent by ourselves
-                if (isLocalAddress(peerIp)) continue;
-
-                if (DISCOVERY_MESSAGE.equals(message)) {
-                    // Discovered a peer! Attempt a TCP connection out to them
-                    tryToConnectToPeer(peerIp);
+    private static void startUdpListener() {
+        new Thread(() -> {
+            DatagramSocket udpSocket = null;
+            try {
+                udpSocket = new DatagramSocket(UDP_PORT);
+            } catch (SocketException e) {
+                try {
+                    udpSocket = new DatagramSocket(0);
+                    UDP_PORT = udpSocket.getLocalPort();
+                    System.out.println("[System] Default UDP port busy. Allocated dynamic port: " + UDP_PORT);
+                } catch (SocketException ex) {
+                    System.err.println("UDP Listener critical setup error: " + ex.getMessage());
+                    return;
                 }
             }
-        } catch (IOException e) {
-            System.err.println("UDP Listener error: " + e.getMessage());
-        }
+
+            try {
+                udpSocket.setBroadcast(true);
+                byte[] buffer = new byte[1024];
+
+                while (true) {
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    udpSocket.receive(packet);
+
+                    String rawMessage = new String(packet.getData(), 0, packet.getLength()).trim();
+                    InetAddress peerIp = packet.getAddress();
+
+                    if (isLocalAddress(peerIp) && packet.getPort() == UDP_PORT) {
+                        continue; 
+                    }
+
+                    if (rawMessage.startsWith(DISCOVERY_MESSAGE + ":")) {
+                        try {
+                            int remoteTcpPort = Integer.parseInt(rawMessage.split(":")[1]);
+                            tryToConnectToPeer(peerIp, remoteTcpPort);
+                        } catch (Exception ignored) {}
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("UDP Listener execution error: " + e.getMessage());
+            } finally {
+                if (udpSocket != null) udpSocket.close();
+            }
+        }, "UDP-Listener").start();
     }
 
-    // --- 3. UDP BROADCASTER ---
     private static void runUdpBroadcaster() {
         try (DatagramSocket udpSocket = new DatagramSocket()) {
             udpSocket.setBroadcast(true);
-            byte[] buffer = DISCOVERY_MESSAGE.getBytes();
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length, InetAddress.getByName("255.255.255.255"), UDP_PORT);
-
+            
             while (true) {
+                String dynamicPayload = DISCOVERY_MESSAGE + ":" + TCP_PORT;
+                byte[] buffer = dynamicPayload.getBytes();
+                
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length, InetAddress.getByName("255.255.255.255"), 9999);
                 udpSocket.send(packet);
-                Thread.sleep(5000); // Broadcast presence every 5 seconds
+                
+                if (UDP_PORT != 9999) {
+                    DatagramPacket localFallbackPacket = new DatagramPacket(buffer, buffer.length, InetAddress.getByName("255.255.255.255"), UDP_PORT);
+                    udpSocket.send(localFallbackPacket);
+                }
+                
+                Thread.sleep(3000); 
             }
         } catch (IOException e) {
             System.err.println("UDP Broadcaster error: " + e.getMessage());
@@ -100,7 +141,6 @@ public class P2PChat {
         }
     }
 
-    // --- 4. CONSOLE WRITER ---
     private static void runConsoleReader() {
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
         System.out.println("System ready. Start typing your messages below:\n");
@@ -119,33 +159,43 @@ public class P2PChat {
         }
     }
 
-    // --- HELPER METHODS ---
-    private static synchronized void tryToConnectToPeer(InetAddress ip) {
-        // Check if we are already connected to this IP to avoid duplicate sockets
+    private static synchronized void tryToConnectToPeer(InetAddress ip, int remoteTcpPort) {
+        if (remoteTcpPort == TCP_PORT && (ip.isLoopbackAddress() || isLocalAddress(ip))) {
+            return;
+        }
+
         for (Socket s : peerSockets) {
-            if (s.getInetAddress().equals(ip)) return;
+            if (s.getInetAddress().equals(ip) && s.getPort() == remoteTcpPort && !s.isClosed()) return;
         }
 
         try {
-            Socket socket = new Socket(ip, TCP_PORT);
+            Socket socket = new Socket(ip, remoteTcpPort);
             if (addPeer(socket)) {
                 new Thread(() -> handlePeerMessages(socket), "Peer-Handler-" + ip).start();
             }
-        } catch (IOException e) {
-            // Quietly fail; the peer might be connecting to us simultaneously
-        }
+        } catch (IOException e) {}
     }
 
     private static synchronized boolean addPeer(Socket socket) {
-        // Double-check to maintain a clean structure
+        InetAddress remoteIp = socket.getInetAddress();
+        int remotePort = socket.getPort();
+
+        if (remotePort == TCP_PORT && (remoteIp.isLoopbackAddress() || isLocalAddress(remoteIp))) {
+            try { socket.close(); } catch (IOException ignored) {}
+            return false;
+        }
+
         for (Socket s : peerSockets) {
-            if (s.getInetAddress().equals(socket.getInetAddress()) && !s.isClosed()) {
-                try { socket.close(); } catch (IOException ignored) {}
-                return false;
+            if (s.getInetAddress().equals(remoteIp) && !s.isClosed()) {
+                if (s.getPort() == remotePort || s.getLocalPort() == remotePort) {
+                    try { socket.close(); } catch (IOException ignored) {}
+                    return false;
+                }
             }
         }
+
         peerSockets.add(socket);
-        System.out.println("\n[System] Connected to a new peer at: " + socket.getInetAddress().getHostAddress());
+        System.out.println("\n[System] Connected to peer: " + remoteIp.getHostAddress() + ":" + remotePort);
         return true;
     }
 
@@ -155,9 +205,8 @@ public class P2PChat {
             while ((incoming = in.readLine()) != null) {
                 System.out.println(incoming);
             }
-        } catch (IOException e) {
-            // Connection lost
-        } finally {
+        } catch (IOException e) {}
+          finally {
             peerSockets.remove(socket);
             System.out.println("\n[System] Peer disconnected: " + socket.getInetAddress().getHostAddress());
             try { socket.close(); } catch (IOException ignored) {}
@@ -169,9 +218,7 @@ public class P2PChat {
             try {
                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
                 out.println(message);
-            } catch (IOException e) {
-                // Stale connection handler will clean this up
-            }
+            } catch (IOException e) {}
         }
     }
 
