@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-package:
-    runs-on: windows-latest  # Needs a Windows environment to generate an .msi file
+    runs-on: windows-latest
 
     steps:
     - name: Checkout Source Code
@@ -39,4 +39,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: TalkMuch-Windows-Installer
-        path: TalkMuchChat-1.0.0.msi
+        path: "*.msi"
