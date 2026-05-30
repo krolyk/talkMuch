@@ -1,0 +1,8 @@
+# Ignore Maven build outputs
+target/
+*.class
+
+# Ignore temporary packaging logs
+manifest.txt
+*.msi
+*.exe
