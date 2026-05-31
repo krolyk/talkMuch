@@ -5,8 +5,6 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.*;
-import java.util.Collections;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class P2PChat {
@@ -14,7 +12,7 @@ public class P2PChat {
     private static int TCP_PORT = 8888;
     private static final String DISCOVERY_MESSAGE = "P2P_CHAT_DISCOVER";
 
-    private static final Set<Socket> peerSockets = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final ConcurrentHashMap<Socket, String> peerMap = new ConcurrentHashMap<>();    
     private static String username = "Unknown";
 
     public static void main(String[] args) {
@@ -174,7 +172,7 @@ public class P2PChat {
             return;
         }
 
-        for (Socket s : peerSockets) {
+        for (Socket s : peerMap.keySet()) {
             if (s.getInetAddress().equals(ip) && s.getPort() == remoteTcpPort && !s.isClosed())
                 return;
         }
@@ -200,7 +198,7 @@ public class P2PChat {
             return false;
         }
 
-        for (Socket s : peerSockets) {
+        for (Socket s : peerMap.keySet()) {
             if (s.getInetAddress().equals(remoteIp) && !s.isClosed()) {
                 if (s.getPort() == remotePort || s.getLocalPort() == remotePort) {
                     try {
@@ -212,30 +210,52 @@ public class P2PChat {
             }
         }
 
-        peerSockets.add(socket);
+        peerMap.put(socket, "Unknown");
         ChatLogger.logSystem("Connected to peer: " + remoteIp.getHostAddress() + ":" + remotePort);
         return true;
     }
 
-    private static void handlePeerMessages(Socket socket) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+        private static void handlePeerMessages(Socket socket) {
+        String remoteAddress = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
+        String peerName = "Unknown";
+        
+        try {
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            
+            // 1. Handshake Phase: Send our username, and read theirs immediately
+            out.println(username);
+            peerName = in.readLine();
+            if (peerName == null || peerName.trim().isEmpty()) {
+                peerName = "Peer";
+            }
+            
+            // 2. Register the peer identity into our map directory
+            peerMap.put(socket, peerName);
+            ChatLogger.logSystem("Connected to user: '" + peerName + "' at " + remoteAddress);
+
+            // 3. Keep standard text conversation active
             String incoming;
             while ((incoming = in.readLine()) != null) {
                 System.out.println(incoming);
             }
+            
         } catch (IOException e) {
+            // Sockets dropping out unexpected clear out here safely
         } finally {
-            peerSockets.remove(socket);
-            System.out.println("\n[System] Peer disconnected: " + socket.getInetAddress().getHostAddress());
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-            }
+            // 4. Remove from active map directory and log identity disconnection
+            peerMap.remove(socket);
+            ChatLogger.logDisconnect(peerName, remoteAddress);
+            
+            try { 
+                socket.close(); 
+            } catch (IOException ignored) {}
         }
     }
 
+
     private static void broadcastMessage(String message) {
-        for (Socket socket : peerSockets) {
+        for (Socket socket : peerMap.keySet()) {
             try {
                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
                 out.println(message);

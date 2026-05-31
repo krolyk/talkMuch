@@ -26,4 +26,8 @@ public class ChatLogger {
     public static void logSystem(String message) {
         System.out.println(SYSTEM_COLOR + "[System] " + message + RESET);
     }
+
+    public static void logDisconnect(String username, String address) {
+        System.out.println(SYSTEM_COLOR + "[System] User '" + username + "' (" + address + ") has disconnected." + RESET);
+    }
 }
